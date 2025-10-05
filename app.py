@@ -361,7 +361,11 @@ with tab_profile:
                 os.makedirs(os.path.dirname(html_path), exist_ok=True)
                 report.show_html(html_path, open_browser=False)
                 with open(html_path, "r", encoding="utf-8") as f:
-                    st.components.v1.html(f.read(), height=900, scrolling=True)
+                    html_content = f.read()
+                st.components.v1.html(html_content, height=900, scrolling=True)
+            except ModuleNotFoundError as e:
+                st.warning("Sweetviz não instalado no ambiente. Instalando 'sweetviz' e 'setuptools' no requirements resolve no deploy.")
+                st.caption(f"Detalhes: {e}")
             except Exception as e:
                 st.error("Relatório automático indisponível.")
                 st.caption(f"Detalhes: {e}")
