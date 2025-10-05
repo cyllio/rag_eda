@@ -189,6 +189,8 @@ def build_system_prompt():
     - Se o usuário pedir gráfico, indique qual gráfico seria adequado e qual coluna usar; o app exibirá na aba Gráficos.
     - Inclua conclusões úteis e possíveis próximos passos.
     - Considere zeros como valores válidos; nunca descarte linhas por conterem 0.
+    - Analise sempre os tipos de dados das colunas. Nem sempre as colunas são numéricas ou categóricas e em alguns momentos será necessário realizar cálculos com estas colunas.
+    - caso os títulos das colunas sejam ANOMES (YYYYMM), existe grande chance dos tipos de dados dessas colunas serem dados usados em cálculos
     - Valores ausentes já foram preenchidos (numéricos=0, categóricos="").
     """)
 
