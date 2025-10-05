@@ -44,18 +44,43 @@ def get_openai_client():
 
 def df_memory_snapshot(df: pd.DataFrame, max_rows=10):
     # snapshot textual resumido do DataFrame para fornecer contexto ao LLM
+    # Converter tipos numpy para tipos Python nativos para serialização JSON
+    def convert_numpy_types(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+    
+    # Converter describe_num para tipos serializáveis
+    describe_num = df.describe(include=[np.number]).round(4)
+    describe_dict = {}
+    for col in describe_num.columns:
+        describe_dict[col] = {stat: convert_numpy_types(val) for stat, val in describe_num[col].items()}
+    
+    # Converter head para tipos serializáveis
+    head_data = df.head(max_rows)
+    head_records = []
+    for _, row in head_data.iterrows():
+        record = {}
+        for col, val in row.items():
+            record[col] = convert_numpy_types(val)
+        head_records.append(record)
+    
     info = {
-        "shape": df.shape,
+        "shape": [int(df.shape[0]), int(df.shape[1])],
         "columns": df.columns.tolist(),
         "dtypes": {c: str(df[c].dtype) for c in df.columns},
         "na_counts": {c: int(df[c].isna().sum()) for c in df.columns},
-        "head": df.head(max_rows).to_dict(orient="records"),
-        "describe_num": df.describe(include=[np.number]).round(4).to_dict(),
+        "head": head_records,
+        "describe_num": describe_dict,
     }
     return info
 
 def detect_column_roles(df: pd.DataFrame):
-    # Detectar colunas ANOMES (formato YYYYMM) e converter para numérico
+    # Detectar colunas ANOMES (formato YYYYMM) - mais restritivo
     anomes_cols = []
     for col in df.columns:
         if isinstance(col, str) and len(col) == 6 and col.isdigit():
@@ -64,7 +89,7 @@ def detect_column_roles(df: pd.DataFrame):
             month = int(col[4:6])
             if year >= 2000 and 1 <= month <= 12:
                 anomes_cols.append(col)
-                # Converter para numérico se ainda não for
+                # Converter para numérico se ainda não for, mas manter como consumo
                 if df[col].dtype == 'object':
                     try:
                         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
@@ -169,8 +194,29 @@ def eda_report(df: pd.DataFrame):
 def default_popular_chart(df, target_col):
     # Escolhe uma análise popular:
     # 1) Se houver Amount e target binário (como Class), plote distribuição de Amount por classe
-    # 2) Caso contrário, mostre top-variance numéricas (bar chart)
-    if "Amount" in df.columns and target_col in df.columns and df[target_col].nunique() <= 10:
+    # 2) Se houver colunas ANOMES, mostre distribuição de consumo por mês
+    # 3) Caso contrário, mostre top-variance numéricas (bar chart)
+    
+    # Detectar colunas ANOMES
+    anomes_cols = [col for col in df.columns if isinstance(col, str) and len(col) == 6 and col.isdigit()]
+    
+    if anomes_cols:
+        # Calcular totais por mês
+        totals = {}
+        for col in anomes_cols:
+            totals[col] = df[col].sum()
+        
+        # Criar gráfico de barras para consumo por mês
+        months = list(totals.keys())
+        values = list(totals.values())
+        
+        fig = px.bar(x=months, y=values, 
+                     labels={"x": "Mês (ANOMES)", "y": "Consumo Total"},
+                     title="Consumo Total por Mês (ANOMES)")
+        fig.update_layout(xaxis_tickangle=-45)
+        return fig, "Consumo total por mês (ANOMES)"
+    
+    elif "Amount" in df.columns and target_col in df.columns and df[target_col].nunique() <= 10:
         fig = px.histogram(df, x="Amount", color=target_col, nbins=50, barmode="overlay", opacity=0.6,
                            title=f"Distribuição de Amount por {target_col}")
         fig.update_layout(legend_title_text=target_col)
@@ -226,10 +272,15 @@ def execute_data_calculations(df: pd.DataFrame, user_msg: str):
                     if df[col].dtype == 'object':
                         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
                 
-                # Calcular totais por mês
+                # Calcular totais por mês - converter para tipos Python nativos
                 totals = {}
                 for col in anomes_cols:
-                    totals[col] = df[col].sum()
+                    total = df[col].sum()
+                    # Converter numpy types para Python nativos
+                    if hasattr(total, 'item'):
+                        totals[col] = total.item()
+                    else:
+                        totals[col] = float(total)
                 
                 # Encontrar maior e menor
                 max_month = max(totals, key=totals.get)
