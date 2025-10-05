@@ -27,7 +27,7 @@ st.set_page_config(page_title="RAG EDA - CSV Agent", layout="wide")
 
 # Aviso sobre ydata-profiling após set_page_config
 if not HAVE_PROFILING:
-    st.warning("ydata-profiling não está disponível. A aba 'Perfil' será desabilitada.")
+    st.warning("ydata-profiling não está disponível. A aba 'Perfil' será desabilitada ou usará ferramenta alternativa.")
 
 # ------------- Utilitários ------------- #
 
@@ -55,15 +55,32 @@ def df_memory_snapshot(df: pd.DataFrame, max_rows=10):
     return info
 
 def detect_column_roles(df: pd.DataFrame):
+    # Detectar colunas ANOMES (formato YYYYMM) e converter para numérico
+    anomes_cols = []
+    for col in df.columns:
+        if isinstance(col, str) and len(col) == 6 and col.isdigit():
+            # Verifica se é formato YYYYMM (ano 2000+ e mês 01-12)
+            year = int(col[:4])
+            month = int(col[4:6])
+            if year >= 2000 and 1 <= month <= 12:
+                anomes_cols.append(col)
+                # Converter para numérico se ainda não for
+                if df[col].dtype == 'object':
+                    try:
+                        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
+                    except:
+                        pass
+    
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
+    
     # Não escolher automaticamente colunas binárias; usar apenas nomes comuns, se existirem
     target_col = None
     for cand in ["Class", "target", "is_fraud", "fraud"]:
         if cand in df.columns:
             target_col = cand
             break
-    return numeric_cols, categorical_cols, target_col
+    return numeric_cols, categorical_cols, target_col, anomes_cols
 
 def compute_correlations(df, numeric_cols):
     if len(numeric_cols) >= 2:
@@ -119,7 +136,7 @@ def generate_conclusions(df, numeric_cols, categorical_cols, target_col, corr):
     return conclusions
 
 def eda_report(df: pd.DataFrame):
-    numeric_cols, categorical_cols, target_col = detect_column_roles(df)
+    numeric_cols, categorical_cols, target_col, anomes_cols = detect_column_roles(df)
     corr = compute_correlations(df, numeric_cols)
     outliers_mask = lof_outliers(df, numeric_cols)  # pode ser None
 
@@ -130,6 +147,7 @@ def eda_report(df: pd.DataFrame):
         "numeric_cols": numeric_cols,
         "categorical_cols": categorical_cols,
         "target_col": target_col,
+        "anomes_cols": anomes_cols,
         "na_counts": df.isna().sum().to_dict(),
         "describe_num": df.describe(include=[np.number]).round(4).to_dict(),
         "corr_exists": corr is not None,
@@ -183,26 +201,69 @@ def build_system_prompt():
     Você é um assistente de análise de dados (EDA) inteligente. Responda em português do Brasil.
     Regras:
     - Baseie-se APENAS no contexto da sessão (metadados do DataFrame, amostras, estatísticas, correlação, conclusões).
-    - Se a pergunta exigir cálculo que não está no contexto, explique o que falta e proponha como calcular.
+    - SEMPRE execute os cálculos e conversões necessários automaticamente. NUNCA diga "você pode fazer" ou "seria necessário". 
+    - SEMPRE forneça respostas diretas com números, resultados e conclusões específicas.
     - Use linguagem clara, objetiva e didática.
     - Quando fizer afirmações numéricas, cite a fonte do contexto (ex: describe_num, distribuição, correlação).
     - Se o usuário pedir gráfico, indique qual gráfico seria adequado e qual coluna usar; o app exibirá na aba Gráficos.
     - Inclua conclusões úteis e possíveis próximos passos.
     - Considere zeros como valores válidos; nunca descarte linhas por conterem 0.
     - Analise sempre os tipos de dados das colunas. Nem sempre as colunas são numéricas ou categóricas e em alguns momentos será necessário realizar cálculos com estas colunas.
-    - caso os títulos das colunas sejam ANOMES (YYYYMM), existe grande chance dos tipos de dados dessas colunas serem dados usados em cálculos
+    - Caso os títulos das colunas sejam ANOMES (YYYYMM), existe grande chance dos tipos de dados dessas colunas serem dados usados em cálculos.
     - Valores ausentes já foram preenchidos (numéricos=0, categóricos="").
+    - IMPORTANTE: Execute TODOS os cálculos automaticamente. Converta tipos quando necessário. Forneça SEMPRE o resultado final, não instruções.
     """)
+
+def execute_data_calculations(df: pd.DataFrame, user_msg: str):
+    """Executa cálculos automáticos baseados na pergunta do usuário"""
+    try:
+        # Detectar se pergunta é sobre ANOMES
+        if any(word in user_msg.lower() for word in ['anomes', 'consumo', 'mês', 'maior', 'menor', 'soma', 'total']):
+            anomes_cols = [col for col in df.columns if isinstance(col, str) and len(col) == 6 and col.isdigit()]
+            if anomes_cols:
+                # Converter para numérico se necessário
+                for col in anomes_cols:
+                    if df[col].dtype == 'object':
+                        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.'), errors='coerce')
+                
+                # Calcular totais por mês
+                totals = {}
+                for col in anomes_cols:
+                    totals[col] = df[col].sum()
+                
+                # Encontrar maior e menor
+                max_month = max(totals, key=totals.get)
+                min_month = min(totals, key=totals.get)
+                
+                return {
+                    "totals_by_month": totals,
+                    "max_month": max_month,
+                    "max_value": totals[max_month],
+                    "min_month": min_month,
+                    "min_value": totals[min_month]
+                }
+    except Exception as e:
+        pass
+    return None
 
 def run_llm_chat(client: OpenAI, user_msg: str, memory: dict):
     # Monta mensagens: system + contexto EDA + histórico resumido + pergunta
     system_prompt = build_system_prompt()
 
+    # Executar cálculos automáticos se necessário
+    df = memory.get("df")
+    calculations = None
+    if df is not None:
+        calculations = execute_data_calculations(df, user_msg)
+
     # Cortar memória se muito grande
     memory_compact = {
-        "eda": {k: v for k, v in memory.get("eda", {}).items() if k in ("shape","numeric_cols","categorical_cols","target_col","na_counts","describe_num","corr_matrix","conclusions","snapshot")},
+        "eda": {k: v for k, v in memory.get("eda", {}).items() if k in ("shape","numeric_cols","categorical_cols","target_col","anomes_cols","na_counts","describe_num","corr_matrix","conclusions","snapshot")},
         "last_answers": memory.get("last_answers", [])[-5:],
     }
+    
+    if calculations:
+        memory_compact["calculations"] = calculations
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -215,7 +276,7 @@ def run_llm_chat(client: OpenAI, user_msg: str, memory: dict):
         model="gpt-4o-mini",
         messages=messages,
         temperature=0.2,
-        max_tokens=800,
+        max_tokens=1000,
     )
     answer = completion.choices[0].message.content
     return answer
@@ -281,6 +342,8 @@ with tab_overview:
 
         st.write("Colunas numéricas:", ", ".join(eda["numeric_cols"]) if eda["numeric_cols"] else "nenhuma")
         st.write("Colunas categóricas:", ", ".join(eda["categorical_cols"]) if eda["categorical_cols"] else "nenhuma")
+        if eda["anomes_cols"]:
+            st.write(f"Colunas ANOMES detectadas: {', '.join(eda['anomes_cols'])}")
         if eda["target_col"]:
             st.write(f"Coluna alvo detectada: {eda['target_col']}")
 
@@ -397,7 +460,7 @@ with tab_chat:
                     resp = run_llm_chat(
                         client=client,
                         user_msg=prompt,
-                        memory={"eda": st.session_state.eda, "last_answers": st.session_state.last_answers}
+                        memory={"eda": st.session_state.eda, "last_answers": st.session_state.last_answers, "df": st.session_state.df}
                     )
                 except Exception as e:
                     resp = f"Falha ao consultar o modelo: {e}"
