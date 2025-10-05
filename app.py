@@ -57,19 +57,12 @@ def df_memory_snapshot(df: pd.DataFrame, max_rows=10):
 def detect_column_roles(df: pd.DataFrame):
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
-    # Heurística de alvo (se existir): 'Class' ou coluna binária comum
+    # Não escolher automaticamente colunas binárias; usar apenas nomes comuns, se existirem
     target_col = None
     for cand in ["Class", "target", "is_fraud", "fraud"]:
         if cand in df.columns:
             target_col = cand
             break
-    # Tenta identificar colunas binárias como alvo
-    if target_col is None:
-        for c in numeric_cols:
-            uniq = df[c].dropna().unique()
-            if len(uniq) <= 2:
-                target_col = c
-                break
     return numeric_cols, categorical_cols, target_col
 
 def compute_correlations(df, numeric_cols):
@@ -195,6 +188,8 @@ def build_system_prompt():
     - Quando fizer afirmações numéricas, cite a fonte do contexto (ex: describe_num, distribuição, correlação).
     - Se o usuário pedir gráfico, indique qual gráfico seria adequado e qual coluna usar; o app exibirá na aba Gráficos.
     - Inclua conclusões úteis e possíveis próximos passos.
+    - Considere zeros como valores válidos; nunca descarte linhas por conterem 0.
+    - Valores ausentes já foram preenchidos (numéricos=0, categóricos="").
     """)
 
 def run_llm_chat(client: OpenAI, user_msg: str, memory: dict):
@@ -252,6 +247,13 @@ if uploaded is not None:
     except Exception:
         uploaded.seek(0)
         df = pd.read_csv(uploaded, sep=";")
+    # Preenche NAs: numéricos com 0, categóricos com string vazia
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    if len(num_cols) > 0:
+        df[num_cols] = df[num_cols].fillna(0)
+    cat_cols = df.select_dtypes(exclude=[np.number]).columns
+    if len(cat_cols) > 0:
+        df[cat_cols] = df[cat_cols].fillna("")
     st.session_state.df = df
     st.session_state.eda = eda_report(df)
     st.success(f"Arquivo carregado: {uploaded.name} | Shape: {df.shape}")
@@ -350,13 +352,20 @@ with tab_profile:
                 html = profile.to_html()
                 st.components.v1.html(html, height=1000, scrolling=True)
         else:
-            st.error("ydata-profiling não está disponível. Esta biblioteca requer ferramentas de compilação que não estão instaladas no seu sistema.")
-            st.info("Você pode usar as outras abas para análise exploratória dos dados.")
-            st.markdown("**Alternativas disponíveis:**")
-            st.markdown("- **Visão Geral**: Resumo estatístico e conclusões automáticas")
-            st.markdown("- **Estatísticas e Correlação**: Análise estatística detalhada e matriz de correlação")
-            st.markdown("- **Gráficos**: Visualizações interativas dos dados")
-            st.markdown("- **Chat**: Conversa com IA sobre os dados")
+            # Fallback: tentar sweetviz
+            try:
+                import sweetviz as sv
+                st.info("ydata-profiling indisponível; exibindo relatório Sweetviz como alternativa.")
+                report = sv.analyze(st.session_state.df)
+                html_path = os.path.join(".streamlit", "sweetviz_report.html")
+                os.makedirs(os.path.dirname(html_path), exist_ok=True)
+                report.show_html(html_path, open_browser=False)
+                with open(html_path, "r", encoding="utf-8") as f:
+                    st.components.v1.html(f.read(), height=900, scrolling=True)
+            except Exception as e:
+                st.error("Relatório automático indisponível.")
+                st.caption(f"Detalhes: {e}")
+                st.info("Use as outras abas para EDA.")
     else:
         st.info("Carregue um CSV para gerar o perfil.")
 
