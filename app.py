@@ -356,11 +356,29 @@ with sample_note:
     st.markdown("- A análise popular padrão: distribuição de Amount por classe (se existir), senão top variância.")
 
 if uploaded is not None:
-    try:
-        df = pd.read_csv(uploaded)
-    except Exception:
-        uploaded.seek(0)
-        df = pd.read_csv(uploaded, sep=";")
+    # Tentar diferentes encodings e separadores
+    df = None
+    used_encoding = None
+    used_separator = None
+    encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+    separators = [',', ';', '\t']
+    
+    for encoding in encodings:
+        for sep in separators:
+            try:
+                uploaded.seek(0)
+                df = pd.read_csv(uploaded, encoding=encoding, sep=sep)
+                used_encoding = encoding
+                used_separator = sep
+                break
+            except Exception:
+                continue
+        if df is not None:
+            break
+    
+    if df is None:
+        st.error("❌ Não foi possível carregar o arquivo CSV. Verifique se é um arquivo CSV válido.")
+        st.stop()
     # Preenche NAs: numéricos com 0, categóricos com string vazia
     num_cols = df.select_dtypes(include=[np.number]).columns
     if len(num_cols) > 0:
@@ -370,7 +388,9 @@ if uploaded is not None:
         df[cat_cols] = df[cat_cols].fillna("")
     st.session_state.df = df
     st.session_state.eda = eda_report(df)
-    st.success(f"Arquivo carregado: {uploaded.name} | Shape: {df.shape}")
+    st.success(f"✅ Arquivo carregado: {uploaded.name} | Shape: {df.shape}")
+    if used_encoding != 'utf-8' or used_separator != ',':
+        st.info(f"📄 Detectado: encoding={used_encoding}, separador='{used_separator}'")
 elif st.session_state.df is None:
     st.info("Carregue um CSV para iniciar. Você pode começar com 'creditcard.csv'.")
 
